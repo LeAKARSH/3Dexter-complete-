@@ -1,0 +1,5 @@
+{
+  "name": "ShapeFlow AI",
+  "description": "AI-powered 3D modeling router with organic (Shap-E) and parametric (OpenSCAD) pipelines.",
+  "requestFramePermissions": []
+}
