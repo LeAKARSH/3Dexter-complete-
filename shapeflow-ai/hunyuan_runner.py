@@ -14,10 +14,9 @@ import gc
 import json
 import os
 import sys
+import uuid
 import torch
 
-# Add parent directory to path for repair module import
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from repair import RepairEngine, RepairConfig, Track
 
 
@@ -32,7 +31,6 @@ def run_hunyuan(text: str, output_dir: str, batch_size: int = 1):
     
     from huggingface_hub import hf_hub_download
     from mglllm.utils.third_party.ollama import generate_3d
-    from mglllm.utils.third_party.ply import save_mesh
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -103,6 +101,7 @@ def run_hunyuan(text: str, output_dir: str, batch_size: int = 1):
             raise ValueError("Hunyuan generation returned no meshes")
         
         successful_meshes = 0
+        run_id = uuid.uuid4().hex[:8]
         for i, mesh_data in enumerate(meshes):
             # Extract mesh from result (format depends on generate_3d output)
             if hasattr(mesh_data, 'mesh'):
@@ -138,9 +137,9 @@ def run_hunyuan(text: str, output_dir: str, batch_size: int = 1):
                 print(f"[hunyuan] Mesh {i} repaired: watertight={repair_result.report['after']['watertight']}, "
                       f"holes={repair_result.report['after']['holes']}", file=sys.stderr)
 
-            ply_name = f"mesh_{i}.ply"
-            obj_name = f"mesh_{i}.obj"
-            stl_name = f"mesh_{i}.stl"
+            ply_name = f"hunyuan_{run_id}_{i}.ply"
+            obj_name = f"hunyuan_{run_id}_{i}.obj"
+            stl_name = f"hunyuan_{run_id}_{i}.stl"
 
             ply_path = os.path.join(output_dir, ply_name)
             obj_path = os.path.join(output_dir, obj_name)

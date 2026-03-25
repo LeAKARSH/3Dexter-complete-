@@ -12,10 +12,9 @@ import gc
 import json
 import os
 import sys
+import uuid
 import torch
 
-# Add parent directory to path for repair module import
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from repair import RepairEngine, RepairConfig, Track
 
 
@@ -74,6 +73,8 @@ def run_shap_e(text: str, output_dir: str, batch_size: int = 1):
         )
         repair_engine = RepairEngine(repair_config)
         
+        run_id = uuid.uuid4().hex[:8]
+
         for i, latent in enumerate(latents):
             tri = decode_latent_mesh(xm, latent).tri_mesh()
 
@@ -98,9 +99,9 @@ def run_shap_e(text: str, output_dir: str, batch_size: int = 1):
                 print(f"[shap-e] Mesh {i} repaired: watertight={repair_result.report['after']['watertight']}, "
                       f"holes={repair_result.report['after']['holes']}", file=sys.stderr)
 
-            ply_name = f"mesh_{i}.ply"
-            obj_name = f"mesh_{i}.obj"
-            stl_name = f"mesh_{i}.stl"  # Add STL export for 3D printing
+            ply_name = f"shapee_{run_id}_{i}.ply"
+            obj_name = f"shapee_{run_id}_{i}.obj"
+            stl_name = f"shapee_{run_id}_{i}.stl"
 
             ply_path = os.path.join(output_dir, ply_name)
             obj_path = os.path.join(output_dir, obj_name)

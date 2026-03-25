@@ -1,68 +1,56 @@
-# Run and deploy your AI Studio app
+# ShapeFlow AI
 
-This contains everything you need to run your app locally.
+ShapeFlow AI routes prompts into two pipelines:
+- Organic mesh generation (`Shape-E` or `HUNYUAN3D-2GP`)
+- Parametric OpenSCAD code generation (local LoRA adapter)
 
-View your app in AI Studio: https://ai.studio/apps/2b3da288-da58-489b-9b38-f97cb3b45cfe
+## What You Need
 
-## Run Locally
+- Node.js 18+
+- Python 3.10+
+- A local parametric model folder (LoRA adapter), set via `PARAMETRIC_MODEL_PATH`
 
-**Prerequisites:** Node.js, Python 3.8+
+## Quick Start
 
 1. Install Python dependencies:
 
-   ```bash
-   pip install -r requirements.txt
-   ```
+```bash
+pip install -r requirements.txt
+```
 
-2. Install Node.js dependencies:
+2. Install Node dependencies:
 
-   ```bash
-   npm install
-   ```
+```bash
+npm install
+```
 
-3. Configure environment variables in [.env](.env) (already configured)
+3. Create `.env` from `.env.example` and set:
 
-4. Run the app:
-   ```bash
-   npm run dev
-   ```
+```env
+PARAMETRIC_MODEL_PATH=C:\path\to\openscad_lora_model_3b
+```
 
-That's it! Both models are loaded on-demand - no need to run separate services.
+4. Start the app:
 
-## Pipeline Notes
+```bash
+npm run dev
+```
 
-- **Organic mode** uses Shape-E for natural/organic shapes (animals, plants, etc.)
-  - Models are loaded on-demand when generating organic shapes
-  - Memory is released immediately after generation
-- **Parametric mode** uses the local `openscad_lora_model_3b` LoRA fine-tuned model
-  - Generates OpenSCAD code for parametric/geometric objects
-  - Models are loaded on-demand when generating parametric shapes
-  - Memory is released immediately after generation
+5. Open `http://localhost:3000`
 
-- **Environment variables** configured in `.env`:
-  **Parametric Model** (`openscad_lora_model_3b`):
-- Base model: `unsloth/qwen2.5-coder-3b-bnb-4bit`
-- Fine-tuning: LoRA adapter for OpenSCAD code generation
-- Configuration: 4-bit quantization for efficient inference
-- Task: Causal language modeling (code generation)
+## Runtime Notes
 
-**Organic Model** (Shape-E):
+- Organic models are loaded on demand and released after each request.
+- Parametric generation uses your local model path from `.env`.
+- `repair.py` is used by organic runners to normalize and repair meshes before export.
+- The UI includes:
+  - Organic model toggle (`Shape-E` / `HUNYUAN`)
+  - Pipeline output panel (organic + parametric)
+  - Generation progress bar
 
-- Pre-trained text-to-3D model from OpenAI
-- Generates mesh files (.obj, .ply) from text prompts
-- Optimized for natural and organic shapes
+## API Endpoints
 
-## Architecture
-
-Both models use **lazy loading**:
-
-- Models load only when a request is made
-- Process the request
-- Clear memory immediately after completion
-- This allows both models to coexist without requiring excessive memory or background services
-  The `openscad_lora_model_3b` model:
-
-- Base model: `unsloth/qwen2.5-coder-3b-bnb-4bit`
-- Fine-tuning: LoRA adapter for OpenSCAD code generation
-- Configuration: 4-bit quantization for efficient inference
-- Task: Causal language modeling (code generation)
+- `POST /api/route` - routes prompt to parametric or organic pipeline
+- `GET /api/config` - reports config status (including local parametric model path detection)
+- `GET /api/organic/view/:filename` - preview mesh files in the viewer
+- `GET /api/organic/download/:filename` - download generated mesh files

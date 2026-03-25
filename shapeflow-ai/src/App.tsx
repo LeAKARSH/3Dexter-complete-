@@ -28,21 +28,16 @@ const OrganicMesh = ({ model }: { model: OrganicModelData }) => {
   const [loadingError, setLoadingError] = useState<string | null>(null);
 
   useEffect(() => {
-    // Debug: Log what we're receiving
-    console.log('[OrganicMesh] Received model data:', JSON.stringify(model, null, 2));
-    
     // Try OBJ first, then fall back to PLY
     const modelUrl = model.objUrl || model.plyUrl;
     const modelType = model.objUrl ? 'OBJ' : 'PLY';
+    setLoadingError(null);
     
     if (!modelUrl) {
-      console.log('[OrganicMesh] No objUrl or plyUrl in model - checking files:', model.files);
       setObject(null);
       setLoadingError('No model file available');
       return;
     }
-
-    console.log('[OrganicMesh] Loading model from:', modelUrl, 'type:', modelType);
 
     let cancelled = false;
     
@@ -81,6 +76,7 @@ const OrganicMesh = ({ model }: { model: OrganicModelData }) => {
 
             loadedObject.position.sub(center);
             loadedObject.scale.setScalar(scale);
+            setLoadingError(null);
             setObject(loadedObject);
           },
           undefined,
@@ -122,6 +118,7 @@ const OrganicMesh = ({ model }: { model: OrganicModelData }) => {
             
             const group = new THREE.Group();
             group.add(mesh);
+            setLoadingError(null);
             setObject(group);
           },
           undefined,
@@ -140,9 +137,7 @@ const OrganicMesh = ({ model }: { model: OrganicModelData }) => {
     };
   }, [model.objUrl, model.plyUrl]);
 
-  // Debug: show error state if present
   if (loadingError) {
-    console.log('[OrganicMesh] Rendering error state:', loadingError);
     return null; // Could return a debug mesh here for testing
   }
 
@@ -180,6 +175,9 @@ export default function App() {
   const [currentModel, setCurrentModel] = useState<{ type: 'organic' | 'parametric', data: any } | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [modelType, setModelType] = useState<'shap-e' | 'hunyuan3d'>('shap-e');
+  const [loadingStage, setLoadingStage] = useState<string>('');
+  const [loadingProgress, setLoadingProgress] = useState<number>(0);
+  const [latestPipelineOutput, setLatestPipelineOutput] = useState<Message | null>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
   const isHunyuanSelected = modelType === 'hunyuan3d';
 
@@ -196,7 +194,30 @@ export default function App() {
     const userMsg = input;
     setInput('');
     setMessages(prev => [...prev, { role: 'user', content: userMsg }]);
+    setLatestPipelineOutput(null);
     setIsLoading(true);
+    setLoadingProgress(0);
+    setLoadingStage('Initializing pipeline...');
+    
+    // Simulate progress stages
+    const stages = [
+      { progress: 10, stage: 'Loading model weights...' },
+      { progress: 25, stage: 'Processing prompt...' },
+      { progress: 45, stage: 'Generating 3D mesh...' },
+      { progress: 70, stage: 'Repairing mesh geometry...' },
+      { progress: 85, stage: 'Exporting files...' },
+      { progress: 95, stage: 'Finalizing...' },
+    ];
+    
+    let currentStageIndex = 0;
+    let progressInterval: ReturnType<typeof setInterval>;
+    progressInterval = setInterval(() => {
+      if (currentStageIndex < stages.length) {
+        setLoadingProgress(stages[currentStageIndex].progress);
+        setLoadingStage(stages[currentStageIndex].stage);
+        currentStageIndex++;
+      }
+    }, 1500);
 
     try {
       const response = await fetch('/api/route', {
@@ -211,30 +232,44 @@ export default function App() {
       }
       
       if (result.type === 'parametric') {
-        setMessages(prev => [...prev, { 
+        const assistantMessage: Message = {
           role: 'assistant', 
           content: `Parametric pipeline response.\n\nType: ${result.type}\n${result.message}`,
           type: 'parametric',
           data: result.code
-        }]);
+        };
+        setMessages(prev => [...prev, assistantMessage]);
+        setLatestPipelineOutput(assistantMessage);
         if (result.code) {
           setCurrentModel({ type: 'parametric', data: result.code });
         }
       } else {
         const organicModelName = result.data?.modelType === 'hunyuan3d' ? 'HUNYUAN' : 'Shape-E';
-        setMessages(prev => [...prev, { 
+        const repairSummary = result.data?.repairReports?.length
+          ? `\nRepair reports: ${result.data.repairReports.length}`
+          : '';
+        const assistantMessage: Message = {
           role: 'assistant', 
-          content: `Organic pipeline response.\n\nModel: ${organicModelName}\nGenerated files: ${(result.data.files || []).join(', ') || 'None'}\n${result.message}`,
+          content: `Organic pipeline response.\n\nModel: ${organicModelName}\nGenerated files: ${(result.data.files || []).join(', ') || 'None'}${repairSummary}\n${result.message}`,
           type: 'organic',
           data: result.data
-        }]);
+        };
+        setMessages(prev => [...prev, assistantMessage]);
+        setLatestPipelineOutput(assistantMessage);
         setCurrentModel({ type: 'organic', data: result.data });
       }
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Sorry, I encountered an error in the pipeline.';
       setMessages(prev => [...prev, { role: 'assistant', content: errorMessage }]);
     } finally {
-      setIsLoading(false);
+      clearInterval(progressInterval);
+      setLoadingProgress(100);
+      setLoadingStage('Completed');
+      setTimeout(() => {
+        setIsLoading(false);
+        setLoadingProgress(0);
+        setLoadingStage('');
+      }, 500);
     }
   };
 
@@ -290,7 +325,7 @@ export default function App() {
               msg.role === 'user' ? "ml-auto items-end" : "items-start"
             )}>
               <div className={cn(
-                "p-3 rounded-2xl text-sm leading-relaxed",
+                "p-3 rounded-2xl text-sm leading-relaxed whitespace-pre-wrap",
                 msg.role === 'user' 
                   ? "bg-emerald-600 text-white rounded-tr-none" 
                   : "bg-white/5 text-gray-200 border border-white/10 rounded-tl-none"
@@ -436,6 +471,23 @@ export default function App() {
         {/* Editor / Controls Overlay */}
         <div className="absolute bottom-6 left-6 right-6 flex items-end justify-between pointer-events-none">
           <div className="flex flex-col gap-4 pointer-events-auto">
+            {latestPipelineOutput && (
+              <div className="bg-black/80 backdrop-blur-xl border border-white/10 rounded-2xl p-4 w-[420px] shadow-2xl">
+                <div className="flex items-center gap-2 text-xs font-mono text-emerald-500 mb-2">
+                  {latestPipelineOutput.type === 'organic' ? <Layers className="w-3 h-3" /> : <Code className="w-3 h-3" />}
+                  PIPELINE OUTPUT
+                </div>
+                {latestPipelineOutput.type === 'parametric' ? (
+                  <pre className="max-h-40 overflow-auto text-[11px] leading-relaxed text-gray-300 whitespace-pre-wrap">
+                    {String(latestPipelineOutput.data || 'No code returned')}
+                  </pre>
+                ) : (
+                  <div className="text-[11px] leading-relaxed text-gray-300 whitespace-pre-wrap">
+                    {latestPipelineOutput.content}
+                  </div>
+                )}
+              </div>
+            )}
             {currentModel?.type === 'parametric' && (
               <div className="bg-black/80 backdrop-blur-xl border border-white/10 rounded-2xl p-4 w-[400px] shadow-2xl">
                 <div className="flex items-center justify-between mb-2">
@@ -478,10 +530,33 @@ export default function App() {
 
         {/* Status Bar */}
         <div className="absolute top-4 right-4 flex items-center gap-4 pointer-events-none">
-          <div className="bg-black/50 backdrop-blur-md border border-white/10 rounded-full px-4 py-1.5 flex items-center gap-2 text-[10px] font-mono tracking-widest text-gray-400">
-            <div className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
-            PIPELINE STATUS: READY
-          </div>
+          {isLoading ? (
+            <div className="bg-black/80 backdrop-blur-md border border-emerald-500/30 rounded-xl px-4 py-3 min-w-[280px]">
+              <div className="flex items-center justify-between mb-2">
+                <div className="flex items-center gap-2 text-[10px] font-mono tracking-widest text-emerald-400">
+                  <Cpu className="w-3 h-3 animate-spin" />
+                  GENERATING
+                </div>
+                <div className="text-[10px] font-mono text-gray-400">
+                  {loadingProgress}%
+                </div>
+              </div>
+              <div className="w-full h-1.5 bg-white/10 rounded-full overflow-hidden">
+                <div 
+                  className="h-full bg-gradient-to-r from-emerald-500 to-emerald-400 rounded-full transition-all duration-500 ease-out"
+                  style={{ width: `${loadingProgress}%` }}
+                />
+              </div>
+              <div className="mt-2 text-[10px] font-mono text-gray-300">
+                {loadingStage}
+              </div>
+            </div>
+          ) : (
+            <div className="bg-black/50 backdrop-blur-md border border-white/10 rounded-full px-4 py-1.5 flex items-center gap-2 text-[10px] font-mono tracking-widest text-gray-400">
+              <div className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+              PIPELINE STATUS: READY
+            </div>
+          )}
         </div>
       </div>
     </div>

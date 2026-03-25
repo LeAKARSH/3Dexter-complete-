@@ -5,8 +5,7 @@
 #
 # Notes:
 # - The main web app itself uses Node/Vite dependencies from package.json.
-# - The shared `repair.py` imported by the organic runners is not inside this
-#   folder; it is expected to exist one directory above this project.
+# - `repair.py` is included in this project and is imported by organic runners.
 # - `Shape_E.py.py` is a legacy Flask helper and is not required for the
 #   current Express/Vite app, so Flask is intentionally not included here.
 
