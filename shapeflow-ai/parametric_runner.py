@@ -4,7 +4,7 @@ import os
 import sys
 import gc
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 from peft import PeftModel
 
 
@@ -36,16 +36,21 @@ def generate_openscad_code(model_path: str, prompt: str) -> str:
         # Load tokenizer
         tokenizer = AutoTokenizer.from_pretrained(base_model_name)
         
+        # Ensure pad token is set properly
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
+            tokenizer.pad_token_id = tokenizer.eos_token_id
+        
         # Create offload directory for model layers that don't fit in memory
         offload_folder = os.path.join(os.path.dirname(model_path), "model_offload")
         os.makedirs(offload_folder, exist_ok=True)
         
-        # Load base model with 4-bit quantization and offloading
+        # Model is already quantized (bnb-4bit), load without additional quantization
+        print("[parametric] Loading pre-quantized model", file=sys.stderr)
         model = AutoModelForCausalLM.from_pretrained(
             base_model_name,
             device_map="auto",
             trust_remote_code=True,
-            load_in_4bit=True,
             offload_folder=offload_folder,
             low_cpu_mem_usage=True,
         )
@@ -57,30 +62,90 @@ def generate_openscad_code(model_path: str, prompt: str) -> str:
         
         print("[parametric] Model loaded successfully", file=sys.stderr)
         
-        # Format the prompt for code generation
-        formatted_prompt = f"Generate OpenSCAD code for: {prompt}\n\n// OpenSCAD code:\n"
+        # Format the prompt using Qwen2.5 chat format (manual construction)
+        # The model expects: <|im_start|>system...<|im_end|><|im_start|>user...<|im_end|><|im_start|>assistant
+        formatted_prompt = f"<|im_start|>system\nYou are an OpenSCAD code generator. Generate ONLY valid OpenSCAD code. Do not include explanations, comments about the code, or examples.<|im_end|>\n<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n"
         
         # Tokenize input
         inputs = tokenizer(formatted_prompt, return_tensors="pt").to(model.device)
         
         print(f"[parametric] Generating code for prompt: '{prompt}'", file=sys.stderr)
         
-        # Generate with appropriate parameters for code generation
+        # Get special token IDs to stop generation early
+        stop_token_ids = [tokenizer.eos_token_id]
+        # Add code-specific stop tokens if they exist
+        for stop_token in ["<|repo_name|>", "<|file_sep|>", "<|fim_prefix|>"]:
+            if stop_token in tokenizer.get_vocab():
+                stop_token_ids.append(tokenizer.convert_tokens_to_ids(stop_token))
+        
+        # Generate with optimized parameters for code generation
         with torch.no_grad():
             outputs = model.generate(
                 **inputs,
-                max_new_tokens=512,
-                temperature=0.7,
-                top_p=0.95,
+                max_new_tokens=512,  # Reduced to prevent including training examples
+                temperature=0.2,  # Even lower for more deterministic code
+                top_p=0.9,
+                top_k=50,
                 do_sample=True,
-                pad_token_id=tokenizer.eos_token_id,
+                num_beams=1,
+                repetition_penalty=1.2,  # Increased to prevent repetitive patterns
+                pad_token_id=tokenizer.pad_token_id,
+                eos_token_id=stop_token_ids,
             )
         
         # Decode the generated code
-        generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
+        generated_text = tokenizer.decode(outputs[0], skip_special_tokens=False)  # Keep special tokens to identify them
         
-        # Extract only the generated code (remove the prompt part)
-        code = generated_text[len(formatted_prompt):].strip()
+        # Extract only the assistant's response (the OpenSCAD code)
+        if "<|im_start|>assistant" in generated_text:
+            code = generated_text.split("<|im_start|>assistant")[-1].strip()
+            if "<|im_end|>" in code:
+                code = code.split("<|im_end|>")[0].strip()
+        else:
+            # Fallback: remove the prompt part
+            code = generated_text[len(formatted_prompt):].strip()
+        
+        # Clean up special tokens from code training (fim = fill-in-middle, repo_name, etc.)
+        special_token_markers = [
+            "<|repo_name|>", "<|file_sep|>", "<|fim_prefix|>", "<|fim_middle|>", "<|fim_suffix|>",
+            "<|endoftext|>", "<|im_start|>", "<|im_end|>", "<tool_call>", "</tool_call>"
+        ]
+        for marker in special_token_markers:
+            if marker in code:
+                code = code.split(marker)[0].strip()
+        
+        # Clean up training artifacts - stop at common training conversation markers
+        training_markers = ["Human:", "Assistant:", "User:", "Question:", "import os", "def generate_", "print("]
+        for marker in training_markers:
+            if marker in code:
+                code = code.split(marker)[0].strip()
+        
+        # Clean up any markdown code blocks if present
+        if code.startswith("```openscad") or code.startswith("```scad") or code.startswith("```"):
+            lines = code.split('\n')
+            if lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+            code = '\n'.join(lines).strip()
+        
+        # Remove any leading incomplete variable assignments (like "ount = 3;")
+        lines = code.split('\n')
+        # Find first line that looks like a complete statement
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            # Check if line starts with a valid OpenSCAD keyword or complete variable name
+            if stripped and (
+                stripped.startswith('module ') or 
+                stripped.startswith('function ') or
+                stripped.startswith('$') or
+                stripped.startswith('//') or
+                (not stripped.startswith('=') and '=' in stripped and stripped[0].isalpha())
+            ):
+                code = '\n'.join(lines[i:])
+                break
+        
+        print(f"[parametric] Generated {len(code)} characters of OpenSCAD code", file=sys.stderr)
         
         return code
         

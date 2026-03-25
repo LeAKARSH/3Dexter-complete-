@@ -22,7 +22,7 @@ bitsandbytes>=0.41.0
 # Organic model runners and model downloads
 huggingface_hub>=0.28.0
 git+https://github.com/openai/shap-e.git
-git+https://github.com/deepbeepmeep/Hunyuan3D-2GP.git#subdirectory=mglllm
+#git+https://github.com/deepbeepmeep/Hunyuan3D-2GP.git#subdirectory=mglllm
 
 # Mesh processing / repair used by the shared repair engine
 trimesh>=4.0.0

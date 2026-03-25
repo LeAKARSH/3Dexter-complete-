@@ -1,3 +1,6 @@
 shapeflow-ai/.env
 shapeflow-ai/node_modules/
 shapeflow-ai/openscad_lora_model_3b
+shapeflow-ai/__pycache__/
+shapeflow-ai/shap_e_model_cache
+shapeflow-ai/venv/

@@ -77,9 +77,9 @@ def run_shap_e(text: str, output_dir: str, batch_size: int = 1):
             clip_denoised=True,
             use_fp16=True,
             use_karras=True,
-            karras_steps=16,
+            karras_steps=35,
             sigma_min=1e-3,
-            sigma_max=160,
+            sigma_max=90,
             s_churn=0,
         )
 
