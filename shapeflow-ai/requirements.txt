@@ -17,5 +17,5 @@ pymeshfix>=0.14.0
 git+https://github.com/openai/shap-e.git
 
 # Hunyuan3D-2GP for high-quality organic mesh generation
-# See: https://github.com/deepbeepmeep/Hunyuan3D-2GP
-mglllm>=0.1.0
+# See: https://github.com/deepbeepmeep/Hunyuan3D-2
+git+https://github.com/deepbeepmeep/Hunyuan3D-2GP.git#subdirectory=mglllm
