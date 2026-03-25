@@ -8,6 +8,20 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from peft import PeftModel
 
 
+def resolve_base_model_name(model_path: str) -> str:
+    adapter_config_path = os.path.join(model_path, "adapter_config.json")
+    if os.path.exists(adapter_config_path):
+        try:
+            with open(adapter_config_path, "r", encoding="utf-8") as config_file:
+                config = json.load(config_file)
+            if config.get("base_model_name_or_path"):
+                return str(config["base_model_name_or_path"])
+        except Exception as exc:
+            print(f"[parametric] Warning: failed reading adapter_config.json: {exc}", file=sys.stderr)
+    # Fallback for older adapters / missing config metadata
+    return "unsloth/qwen2.5-coder-3b-bnb-4bit"
+
+
 def generate_openscad_code(model_path: str, prompt: str) -> str:
     """
     Load model, generate OpenSCAD code, unload model, return code.
@@ -15,8 +29,7 @@ def generate_openscad_code(model_path: str, prompt: str) -> str:
     so memory is only used when needed.
     """
     try:
-        # The adapter config shows base model is "unsloth/qwen2.5-coder-3b-bnb-4bit"
-        base_model_name = "unsloth/qwen2.5-coder-3b-bnb-4bit"
+        base_model_name = resolve_base_model_name(model_path)
         
         print(f"[parametric] Loading base model: {base_model_name}", file=sys.stderr)
         

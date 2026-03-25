@@ -11,7 +11,6 @@ dotenv.config();
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const PARAMETRIC_MODEL_URL = process.env.PARAMETRIC_MODEL_URL?.replace(/\/$/, "");
-const PARAMETRIC_MODEL_PATH = process.env.PARAMETRIC_MODEL_PATH;
 const PARAMETRIC_RUNNER_SCRIPT = process.env.PARAMETRIC_RUNNER_SCRIPT || path.join(__dirname, "parametric_runner.py");
 const SHAPE_E_RUNNER_SCRIPT = process.env.SHAPE_E_RUNNER_SCRIPT || path.join(__dirname, "shape_e_runner.py");
 const HUNYUAN_RUNNER_SCRIPT = process.env.HUNYUAN_RUNNER_SCRIPT || path.join(__dirname, "hunyuan_runner.py");
@@ -32,6 +31,34 @@ type OrganicResult = {
 
 // Supported organic mesh generation models
 type OrganicModelType = "shap-e" | "hunyuan3d";
+
+function isValidParametricAdapterDir(modelPath: string) {
+  const configPath = path.join(modelPath, "adapter_config.json");
+  const weightsPath = path.join(modelPath, "adapter_model.safetensors");
+  return fs.existsSync(configPath) && fs.existsSync(weightsPath);
+}
+
+function detectLocalParametricModelPath() {
+  const candidateDirs = [
+    path.join(__dirname, "Parametric model", "openscad_lora_model_3b_2"),
+    path.join(__dirname, "Parametric model", "openscad_lora_model_3b"),
+    path.join(__dirname, "openscad_lora_model_3b_2"),
+    path.join(__dirname, "openscad_lora_model_3b"),
+  ];
+
+  for (const candidate of candidateDirs) {
+    if (isValidParametricAdapterDir(candidate)) {
+      return candidate;
+    }
+  }
+
+  return null;
+}
+
+const RESOLVED_PARAMETRIC_MODEL_PATH =
+  process.env.PARAMETRIC_MODEL_PATH && isValidParametricAdapterDir(process.env.PARAMETRIC_MODEL_PATH)
+    ? process.env.PARAMETRIC_MODEL_PATH
+    : detectLocalParametricModelPath();
 
 function parseRunnerJson<T>(stdout: string, label: string): Partial<T> {
   const trimmed = stdout.trim();
@@ -77,7 +104,7 @@ function classifyPrompt(prompt: string): "organic" | "parametric" {
 }
 
 async function generateParametricModel(prompt: string): Promise<ParametricResult> {
-  if (PARAMETRIC_MODEL_PATH) {
+  if (RESOLVED_PARAMETRIC_MODEL_PATH) {
     return runLocalParametricModel(prompt);
   }
 
@@ -117,16 +144,23 @@ async function generateParametricModel(prompt: string): Promise<ParametricResult
 }
 
 function validateLocalParametricModel() {
-  if (!PARAMETRIC_MODEL_PATH) {
+  if (!RESOLVED_PARAMETRIC_MODEL_PATH) {
     throw Object.assign(
-      new Error("PARAMETRIC_MODEL_PATH is missing. Add your local parametric model path in .env."),
+      new Error("No valid parametric adapter directory found. Set PARAMETRIC_MODEL_PATH in .env or place the adapter under 'Parametric model'."),
       { statusCode: 501 },
     );
   }
 
-  if (!fs.existsSync(PARAMETRIC_MODEL_PATH)) {
+  if (!fs.existsSync(RESOLVED_PARAMETRIC_MODEL_PATH)) {
     throw Object.assign(
-      new Error(`PARAMETRIC_MODEL_PATH does not exist: ${PARAMETRIC_MODEL_PATH}`),
+      new Error(`Parametric model path does not exist: ${RESOLVED_PARAMETRIC_MODEL_PATH}`),
+      { statusCode: 500 },
+    );
+  }
+
+  if (!isValidParametricAdapterDir(RESOLVED_PARAMETRIC_MODEL_PATH)) {
+    throw Object.assign(
+      new Error(`Invalid parametric adapter directory: ${RESOLVED_PARAMETRIC_MODEL_PATH}. Missing adapter_config.json or adapter_model.safetensors.`),
       { statusCode: 500 },
     );
   }
@@ -138,7 +172,7 @@ async function runLocalParametricModel(prompt: string): Promise<ParametricResult
   return new Promise((resolve, reject) => {
     const child = spawn(
       PYTHON_EXECUTABLE,
-      [PARAMETRIC_RUNNER_SCRIPT, "--model", PARAMETRIC_MODEL_PATH!, "--prompt", prompt],
+      [PARAMETRIC_RUNNER_SCRIPT, "--model", RESOLVED_PARAMETRIC_MODEL_PATH!, "--prompt", prompt],
       {
         cwd: __dirname,
         env: process.env,
@@ -415,8 +449,8 @@ async function startServer() {
 
   app.get("/api/config", (_req, res) => {
     res.json({
-      parametricModelConfigured: Boolean(PARAMETRIC_MODEL_PATH && fs.existsSync(PARAMETRIC_MODEL_PATH)),
-      parametricModelPath: PARAMETRIC_MODEL_PATH || null,
+      parametricModelConfigured: Boolean(RESOLVED_PARAMETRIC_MODEL_PATH && isValidParametricAdapterDir(RESOLVED_PARAMETRIC_MODEL_PATH)),
+      parametricModelPath: RESOLVED_PARAMETRIC_MODEL_PATH || null,
       pythonExecutable: PYTHON_EXECUTABLE,
       organicModels: ["shap-e", "hunyuan3d"],
     });

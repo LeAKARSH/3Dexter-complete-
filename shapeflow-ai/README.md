@@ -38,6 +38,9 @@ npm run dev
 
 5. Open `http://localhost:3000`
 
+If you keep the adapter at `Parametric model/openscad_lora_model_3b_2` inside this repo,
+the server auto-detects it and works even without `.env`.
+
 ## Runtime Notes
 
 - Organic models are loaded on demand and released after each request.
