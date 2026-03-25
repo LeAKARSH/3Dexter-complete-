@@ -28,6 +28,8 @@ def run_hunyuan(text: str, output_dir: str, batch_size: int = 1):
     state leaks into module-level memory between calls.
     """
     # --- lazy imports ---
+    import trimesh
+    
     from huggingface_hub import hf_hub_download
     from mglllm.utils.third_party.ollama import generate_3d
     from mglllm.utils.third_party.ply import save_mesh
@@ -105,9 +107,11 @@ def run_hunyuan(text: str, output_dir: str, batch_size: int = 1):
             # Extract mesh from result (format depends on generate_3d output)
             if hasattr(mesh_data, 'mesh'):
                 mesh = mesh_data.mesh
+                if mesh is None:
+                    print(f"[hunyuan] Mesh {i} is None - skipping", file=sys.stderr)
+                    continue
             elif hasattr(mesh_data, 'vertices'):
                 # Already a trimesh object
-                import trimesh
                 mesh = mesh_data
             else:
                 print(f"[hunyuan] Unknown mesh format for mesh {i}", file=sys.stderr)
@@ -117,8 +121,16 @@ def run_hunyuan(text: str, output_dir: str, batch_size: int = 1):
             print(f"[hunyuan] Repairing mesh {i}...", file=sys.stderr)
             repair_result = repair_engine.repair(mesh)
             
+            # Ensure we always have a trimesh.Trimesh object for export
             if not repair_result.ok:
                 print(f"[hunyuan] Repair warning for mesh {i}: {repair_result.error}", file=sys.stderr)
+                # Ensure original mesh is a trimesh object before using as fallback
+                if not isinstance(mesh, trimesh.Trimesh):
+                    if hasattr(mesh, 'vertices') and hasattr(mesh, 'faces'):
+                        mesh = trimesh.Trimesh(vertices=mesh.vertices, faces=mesh.faces, process=False)
+                    else:
+                        print(f"[hunyuan] Cannot use mesh {i} - not a valid trimesh object", file=sys.stderr)
+                        continue
                 repaired_mesh = mesh
             else:
                 repaired_mesh = repair_result.mesh

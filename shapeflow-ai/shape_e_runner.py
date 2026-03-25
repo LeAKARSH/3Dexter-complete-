@@ -26,6 +26,8 @@ def run_shap_e(text: str, output_dir: str, batch_size: int = 1):
     torch state leaks into module-level memory between calls.
     """
     # --- lazy imports so nothing loads at startup ---
+    import trimesh
+    
     from shap_e.diffusion.gaussian_diffusion import diffusion_from_config
     from shap_e.diffusion.sample import sample_latents
     from shap_e.models.download import load_config, load_model
@@ -79,9 +81,16 @@ def run_shap_e(text: str, output_dir: str, batch_size: int = 1):
             print(f"[shap-e] Repairing mesh {i}...", file=sys.stderr)
             repair_result = repair_engine.repair(tri)
             
+            # Ensure we always have a trimesh.Trimesh object for export
             if not repair_result.ok:
                 print(f"[shap-e] Repair warning for mesh {i}: {repair_result.error}", file=sys.stderr)
-                # Use original mesh if repair failed
+                # Ensure original mesh is a trimesh object before using as fallback
+                if not isinstance(tri, trimesh.Trimesh):
+                    if hasattr(tri, 'vertices') and hasattr(tri, 'faces'):
+                        tri = trimesh.Trimesh(vertices=tri.vertices, faces=tri.faces, process=False)
+                    else:
+                        print(f"[shap-e] Cannot use mesh {i} - not a valid trimesh object", file=sys.stderr)
+                        continue
                 repaired_mesh = tri
             else:
                 repaired_mesh = repair_result.mesh
