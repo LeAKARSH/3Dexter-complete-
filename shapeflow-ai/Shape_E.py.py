@@ -64,6 +64,9 @@ def run_shap_e(text: str, batch_size: int = 1):
 
         # --- decode & save meshes ---
         saved_files = []
+
+        import trimesh
+
         for i, latent in enumerate(latents):
             tri = decode_latent_mesh(xm, latent).tri_mesh()
 
@@ -73,10 +76,27 @@ def run_shap_e(text: str, batch_size: int = 1):
             ply_path = os.path.join(OUTPUT_DIR, ply_name)
             obj_path = os.path.join(OUTPUT_DIR, obj_name)
 
+            # Save original mesh
             with open(ply_path, "wb") as f:
                 tri.write_ply(f)
             with open(obj_path, "w") as f:
                 tri.write_obj(f)
+
+            # --- Mesh repair using trimesh ---
+            try:
+                mesh = trimesh.load(ply_path, force='mesh')
+                if not mesh.is_watertight or not mesh.is_winding_consistent:
+                    mesh = mesh.fill_holes()
+                    mesh.remove_degenerate_faces()
+                    mesh.remove_duplicate_faces()
+                    mesh.remove_infinite_values()
+                    mesh.remove_unreferenced_vertices()
+                    mesh.process(validate=True)
+                    mesh.export(ply_path)
+                    mesh.export(obj_path)
+                    print(f"[shap-e] Mesh repaired for {ply_name} and {obj_name}")
+            except Exception as repair_exc:
+                print(f"[shap-e] Mesh repair failed: {repair_exc}")
 
             saved_files.append(ply_name)
             saved_files.append(obj_name)
@@ -104,14 +124,18 @@ def shap_e_endpoint():
 
     try:
         files = run_shap_e(text)
-        download_urls = [
-            request.host_url.rstrip("/") + f"/shap-e/download/{fname}"
-            for fname in files
-        ]
+        # Find obj and ply files
+        obj_file = next((f for f in files if f.endswith('.obj')), None)
+        ply_file = next((f for f in files if f.endswith('.ply')), None)
+        obj_url = request.host_url.rstrip("/") + f"/shap-e/download/{obj_file}" if obj_file else None
+        ply_url = request.host_url.rstrip("/") + f"/shap-e/download/{ply_file}" if ply_file else None
         return jsonify({
             "prompt": text,
             "files": files,
-            "download_urls": download_urls,
+            "objFile": obj_file,
+            "plyFile": ply_file,
+            "objUrl": obj_url,
+            "plyUrl": ply_url,
         })
     except Exception as e:
         traceback.print_exc()
