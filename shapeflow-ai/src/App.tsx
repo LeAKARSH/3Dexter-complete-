@@ -100,6 +100,7 @@ export default function App() {
   const [isLoading, setIsLoading] = useState(false);
   const [currentModel, setCurrentModel] = useState<{ type: 'organic' | 'parametric', data: any } | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [modelType, setModelType] = useState<'shap-e' | 'hunyuan3d'>('shap-e');
   const chatEndRef = useRef<HTMLDivElement>(null);
 
   const scrollToBottom = () => {
@@ -121,7 +122,7 @@ export default function App() {
       const response = await fetch('/api/route', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt: userMsg }),
+        body: JSON.stringify({ prompt: userMsg, modelType }),
       });
 
       const result = await response.json();
@@ -231,6 +232,17 @@ export default function App() {
         </div>
 
         <form onSubmit={handleSubmit} className="p-4 border-t border-white/10">
+          <div className="flex items-center gap-3 mb-3">
+            <label className="text-xs text-gray-400 font-mono">Model:</label>
+            <select
+              value={modelType}
+              onChange={(e) => setModelType(e.target.value as 'shap-e' | 'hunyuan3d')}
+              className="bg-white/5 border border-white/10 rounded-lg py-1 px-2 text-xs text-gray-200 focus:outline-none focus:border-emerald-500/50"
+            >
+              <option value="shap-e">Shape-E (Fast)</option>
+              <option value="hunyuan3d">Hunyuan3D-2GP (High Quality)</option>
+            </select>
+          </div>
           <div className="relative">
             <input
               value={input}
