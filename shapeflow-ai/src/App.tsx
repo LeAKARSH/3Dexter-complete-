@@ -4,7 +4,7 @@ import { OrbitControls, PerspectiveCamera, Grid, Stage } from '@react-three/drei
 import { Send, Box, Cpu, Download, Code, Layers, Trash2, ChevronRight, ChevronLeft } from 'lucide-react';
 import { cn } from './lib/utils';
 import * as THREE from 'three';
-import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader.js';
+// Remove static imports - we'll use dynamic imports for loaders
 
 interface Message {
   role: 'user' | 'assistant';
@@ -25,56 +25,126 @@ interface OrganicModelData {
 
 const OrganicMesh = ({ model }: { model: OrganicModelData }) => {
   const [object, setObject] = useState<THREE.Group | null>(null);
+  const [loadingError, setLoadingError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!model.objUrl) {
+    // Debug: Log what we're receiving
+    console.log('[OrganicMesh] Received model data:', JSON.stringify(model, null, 2));
+    
+    // Try OBJ first, then fall back to PLY
+    const modelUrl = model.objUrl || model.plyUrl;
+    const modelType = model.objUrl ? 'OBJ' : 'PLY';
+    
+    if (!modelUrl) {
+      console.log('[OrganicMesh] No objUrl or plyUrl in model - checking files:', model.files);
       setObject(null);
+      setLoadingError('No model file available');
       return;
     }
 
+    console.log('[OrganicMesh] Loading model from:', modelUrl, 'type:', modelType);
+
     let cancelled = false;
-    const loader = new OBJLoader();
+    
+    // Import both loaders dynamically
+    Promise.all([
+      import('three/examples/jsm/loaders/OBJLoader.js'),
+      import('three/examples/jsm/loaders/PLYLoader.js')
+    ]).then(([{ OBJLoader }, { PLYLoader }]) => {
+      if (cancelled) return;
+      
+      if (modelType === 'OBJ') {
+        const loader = new OBJLoader();
+        loader.load(
+          modelUrl,
+          (loadedObject) => {
+            if (cancelled) return;
 
-    loader.load(
-      model.objUrl,
-      (loadedObject) => {
-        if (cancelled) return;
+            const box = new THREE.Box3().setFromObject(loadedObject);
+            const center = box.getCenter(new THREE.Vector3());
+            const size = box.getSize(new THREE.Vector3());
+            const maxAxis = Math.max(size.x, size.y, size.z);
+            const scale = maxAxis > 0 ? 3 / maxAxis : 1;
 
-        const box = new THREE.Box3().setFromObject(loadedObject);
-        const center = box.getCenter(new THREE.Vector3());
-        const size = box.getSize(new THREE.Vector3());
-        const maxAxis = Math.max(size.x, size.y, size.z);
-        const scale = maxAxis > 0 ? 3 / maxAxis : 1;
+            loadedObject.traverse((child) => {
+              if ((child as THREE.Mesh).isMesh) {
+                const mesh = child as THREE.Mesh;
+                mesh.castShadow = true;
+                mesh.receiveShadow = true;
+                mesh.material = new THREE.MeshStandardMaterial({
+                  color: '#10b981',
+                  roughness: 0.45,
+                  metalness: 0.15,
+                });
+              }
+            });
 
-        loadedObject.traverse((child) => {
-          if ((child as THREE.Mesh).isMesh) {
-            const mesh = child as THREE.Mesh;
+            loadedObject.position.sub(center);
+            loadedObject.scale.setScalar(scale);
+            setObject(loadedObject);
+          },
+          undefined,
+          (error) => {
+            console.error('Failed to load organic OBJ preview:', error);
+            setLoadingError('Failed to load OBJ file');
+            setObject(null);
+          }
+        );
+      } else {
+        // PLY loader
+        const loader = new PLYLoader();
+        loader.load(
+          modelUrl,
+          (geometry) => {
+            if (cancelled) return;
+            
+            geometry.computeVertexNormals();
+            const mesh = new THREE.Mesh(
+              geometry,
+              new THREE.MeshStandardMaterial({
+                color: '#10b981',
+                roughness: 0.45,
+                metalness: 0.15,
+                side: THREE.DoubleSide,
+              })
+            );
             mesh.castShadow = true;
             mesh.receiveShadow = true;
-            mesh.material = new THREE.MeshStandardMaterial({
-              color: '#10b981',
-              roughness: 0.45,
-              metalness: 0.15,
-            });
+            
+            const box = new THREE.Box3().setFromObject(mesh);
+            const center = box.getCenter(new THREE.Vector3());
+            const size = box.getSize(new THREE.Vector3());
+            const maxAxis = Math.max(size.x, size.y, size.z);
+            const scale = maxAxis > 0 ? 3 / maxAxis : 1;
+            
+            mesh.position.sub(center);
+            mesh.scale.setScalar(scale);
+            
+            const group = new THREE.Group();
+            group.add(mesh);
+            setObject(group);
+          },
+          undefined,
+          (error) => {
+            console.error('Failed to load organic PLY preview:', error);
+            setLoadingError('Failed to load PLY file');
+            setObject(null);
           }
-        });
-
-        loadedObject.position.sub(center);
-        loadedObject.scale.setScalar(scale);
-        setObject(loadedObject);
-      },
-      undefined,
-      (error) => {
-        console.error('Failed to load organic OBJ preview:', error);
-        setObject(null);
+        );
       }
-    );
+    });
 
     return () => {
       cancelled = true;
       setObject(null);
     };
-  }, [model.objUrl]);
+  }, [model.objUrl, model.plyUrl]);
+
+  // Debug: show error state if present
+  if (loadingError) {
+    console.log('[OrganicMesh] Rendering error state:', loadingError);
+    return null; // Could return a debug mesh here for testing
+  }
 
   if (!object) return null;
 

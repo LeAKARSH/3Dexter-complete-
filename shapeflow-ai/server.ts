@@ -217,6 +217,8 @@ async function runLocalShapeERunner(prompt: string): Promise<OrganicResult> {
         return;
       }
 
+      console.log("[Shape-E Runner] Raw stdout:", stdout);
+      
       try {
         const parsed = JSON.parse(stdout) as Partial<OrganicResult>;
         if (!parsed.files) {
@@ -399,6 +401,14 @@ async function startServer() {
       // Support model selection for organic generation
       const selectedModel = modelType === "hunyuan3d" ? "hunyuan3d" : "shap-e";
       const organicResponse = await generateOrganicModel(prompt, selectedModel);
+      
+      // Debug: Log the response data
+      console.log("[Server] Organic response:", JSON.stringify({
+        type: "organic",
+        data: organicResponse,
+        message: organicResponse.message,
+      }, null, 2));
+      
       return res.json({
         type: "organic",
         data: organicResponse,
