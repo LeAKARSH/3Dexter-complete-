@@ -20,6 +20,7 @@ interface OrganicModelData {
   objUrl: string | null;
   plyUrl: string | null;
   message?: string;
+  modelType?: 'shap-e' | 'hunyuan3d';
 }
 
 const OrganicMesh = ({ model }: { model: OrganicModelData }) => {
@@ -39,6 +40,12 @@ const OrganicMesh = ({ model }: { model: OrganicModelData }) => {
       (loadedObject) => {
         if (cancelled) return;
 
+        const box = new THREE.Box3().setFromObject(loadedObject);
+        const center = box.getCenter(new THREE.Vector3());
+        const size = box.getSize(new THREE.Vector3());
+        const maxAxis = Math.max(size.x, size.y, size.z);
+        const scale = maxAxis > 0 ? 3 / maxAxis : 1;
+
         loadedObject.traverse((child) => {
           if ((child as THREE.Mesh).isMesh) {
             const mesh = child as THREE.Mesh;
@@ -52,6 +59,8 @@ const OrganicMesh = ({ model }: { model: OrganicModelData }) => {
           }
         });
 
+        loadedObject.position.sub(center);
+        loadedObject.scale.setScalar(scale);
         setObject(loadedObject);
       },
       undefined,
@@ -102,6 +111,7 @@ export default function App() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [modelType, setModelType] = useState<'shap-e' | 'hunyuan3d'>('shap-e');
   const chatEndRef = useRef<HTMLDivElement>(null);
+  const isHunyuanSelected = modelType === 'hunyuan3d';
 
   const scrollToBottom = () => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -141,9 +151,10 @@ export default function App() {
           setCurrentModel({ type: 'parametric', data: result.code });
         }
       } else {
+        const organicModelName = result.data?.modelType === 'hunyuan3d' ? 'HUNYUAN' : 'Shape-E';
         setMessages(prev => [...prev, { 
           role: 'assistant', 
-          content: `Organic pipeline response.\n\nGenerated files: ${(result.data.files || []).join(', ') || 'None'}\n${result.message}`,
+          content: `Organic pipeline response.\n\nModel: ${organicModelName}\nGenerated files: ${(result.data.files || []).join(', ') || 'None'}\n${result.message}`,
           type: 'organic',
           data: result.data
         }]);
@@ -162,7 +173,9 @@ export default function App() {
 
     if (currentModel.type === 'organic') {
       const organicData = currentModel.data as OrganicModelData;
-      const url = format === 'obj' ? organicData.objUrl : organicData.plyUrl;
+      const url = format === 'obj'
+        ? (organicData.objFile ? `/api/organic/download/${encodeURIComponent(organicData.objFile)}` : null)
+        : organicData.plyUrl;
       if (!url) return;
 
       const a = document.createElement('a');
@@ -232,16 +245,59 @@ export default function App() {
         </div>
 
         <form onSubmit={handleSubmit} className="p-4 border-t border-white/10">
-          <div className="flex items-center gap-3 mb-3">
-            <label className="text-xs text-gray-400 font-mono">Model:</label>
-            <select
-              value={modelType}
-              onChange={(e) => setModelType(e.target.value as 'shap-e' | 'hunyuan3d')}
-              className="bg-white/5 border border-white/10 rounded-lg py-1 px-2 text-xs text-gray-200 focus:outline-none focus:border-emerald-500/50"
-            >
-              <option value="shap-e">Shape-E (Fast)</option>
-              <option value="hunyuan3d">Hunyuan3D-2GP (High Quality)</option>
-            </select>
+          <div className="mb-3 rounded-2xl border border-white/10 bg-white/[0.03] p-3">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <div className="text-[10px] uppercase tracking-[0.24em] text-gray-500 font-mono">
+                  Organic Model
+                </div>
+                <div className="mt-1 text-sm text-gray-200">
+                  Toggle between Shape-E and HUNYUAN for organic generations.
+                </div>
+              </div>
+              <div className="text-right">
+                <div className="text-xs font-semibold text-white">
+                  {isHunyuanSelected ? 'HUNYUAN' : 'Shape-E'}
+                </div>
+                <div className="text-[11px] text-gray-400">
+                  {isHunyuanSelected ? 'Higher detail' : 'Faster drafts'}
+                </div>
+              </div>
+            </div>
+
+            <div className="mt-3 flex items-center gap-3">
+              <span className={cn(
+                "text-xs font-mono transition-colors",
+                !isHunyuanSelected ? "text-emerald-400" : "text-gray-500"
+              )}>
+                Shape-E
+              </span>
+              <button
+                type="button"
+                onClick={() => setModelType(isHunyuanSelected ? 'shap-e' : 'hunyuan3d')}
+                aria-pressed={isHunyuanSelected}
+                aria-label={`Switch organic model. Current model is ${isHunyuanSelected ? 'HUNYUAN' : 'Shape-E'}.`}
+                className={cn(
+                  "relative inline-flex h-7 w-14 items-center rounded-full border transition-all focus:outline-none focus:ring-2 focus:ring-emerald-500/40 focus:ring-offset-0",
+                  isHunyuanSelected
+                    ? "border-emerald-400/50 bg-emerald-500/20"
+                    : "border-white/10 bg-white/10"
+                )}
+              >
+                <span
+                  className={cn(
+                    "inline-block h-5 w-5 transform rounded-full bg-white shadow-lg transition-transform",
+                    isHunyuanSelected ? "translate-x-8" : "translate-x-1"
+                  )}
+                />
+              </button>
+              <span className={cn(
+                "text-xs font-mono transition-colors",
+                isHunyuanSelected ? "text-emerald-400" : "text-gray-500"
+              )}>
+                HUNYUAN
+              </span>
+            </div>
           </div>
           <div className="relative">
             <input
@@ -301,6 +357,9 @@ export default function App() {
             
             <ambientLight intensity={0.5} />
             <pointLight position={[10, 10, 10]} intensity={1} castShadow />
+            {currentModel?.type === 'organic' && (
+              <pointLight position={[-8, 6, -8]} intensity={0.5} />
+            )}
           </Canvas>
         </div>
 

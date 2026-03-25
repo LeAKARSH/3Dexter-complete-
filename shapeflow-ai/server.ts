@@ -335,12 +335,34 @@ async function generateOrganicModel(prompt: string, modelType: OrganicModelType 
     files: result.files,
     objFile,
     plyFile,
-    objUrl: objFile ? `/api/organic/download/${encodeURIComponent(objFile)}` : null,
+    objUrl: objFile ? `/api/organic/view/${encodeURIComponent(objFile)}` : null,
     plyUrl: plyFile ? `/api/organic/download/${encodeURIComponent(plyFile)}` : null,
     message: result.message,
     repairReports: result.repair_reports,
     modelType,
   };
+}
+
+function resolveOrganicOutputFile(filename: string) {
+  let filePath = path.join(SHAPE_E_OUTPUT_DIR, filename);
+
+  if (!fs.existsSync(filePath)) {
+    filePath = path.join(HUNYUAN_OUTPUT_DIR, filename);
+  }
+
+  const normalizedPath = path.normalize(filePath);
+  const allowedDirs = [path.normalize(SHAPE_E_OUTPUT_DIR), path.normalize(HUNYUAN_OUTPUT_DIR)];
+  const isAllowed = allowedDirs.some((dir) => normalizedPath.startsWith(dir));
+
+  if (!isAllowed) {
+    throw Object.assign(new Error("Access denied"), { statusCode: 403 });
+  }
+
+  if (!fs.existsSync(normalizedPath)) {
+    throw Object.assign(new Error(`File not found: ${filename}`), { statusCode: 404 });
+  }
+
+  return normalizedPath;
 }
 
 async function startServer() {
@@ -393,23 +415,25 @@ async function startServer() {
     }
   });
 
+  app.get("/api/organic/view/:filename", (req, res) => {
+    try {
+      const filePath = resolveOrganicOutputFile(req.params.filename);
+      res.sendFile(filePath);
+    } catch (error) {
+      console.error("Organic preview error:", error);
+      const statusCode =
+        typeof error === "object" && error && "statusCode" in error && typeof error.statusCode === "number"
+          ? error.statusCode
+          : 500;
+      const message = error instanceof Error ? error.message : "Failed to load preview file";
+      res.status(statusCode).json({ error: message });
+    }
+  });
+
   app.get("/api/organic/download/:filename", (req, res) => {
     try {
       const filename = req.params.filename;
-      // Check both output directories
-      let filePath = path.join(SHAPE_E_OUTPUT_DIR, filename);
-      
-      if (!fs.existsSync(filePath)) {
-        filePath = path.join(HUNYUAN_OUTPUT_DIR, filename);
-      }
-      
-      // Security check: ensure the file is within an allowed output directory
-      const normalizedPath = path.normalize(filePath);
-      const allowedDirs = [path.normalize(SHAPE_E_OUTPUT_DIR), path.normalize(HUNYUAN_OUTPUT_DIR)];
-      const isAllowed = allowedDirs.some(dir => normalizedPath.startsWith(dir));
-      if (!isAllowed) {
-        return res.status(403).json({ error: "Access denied" });
-      }
+      const filePath = resolveOrganicOutputFile(filename);
 
       res.download(filePath, filename, (err) => {
         if (err) {
@@ -421,7 +445,12 @@ async function startServer() {
       });
     } catch (error) {
       console.error("Organic download error:", error);
-      res.status(500).json({ error: "Failed to download file" });
+      const statusCode =
+        typeof error === "object" && error && "statusCode" in error && typeof error.statusCode === "number"
+          ? error.statusCode
+          : 500;
+      const message = error instanceof Error ? error.message : "Failed to download file";
+      res.status(statusCode).json({ error: message });
     }
   });
 
