@@ -17,7 +17,7 @@ numpy>=1.26.0
 transformers>=4.35.0
 peft>=0.7.0
 accelerate>=0.25.0
-bitsandbytes>=0.41.0
+bitsandbytes>=0.43.0
 
 # Organic model runners and model downloads
 huggingface_hub>=0.28.0

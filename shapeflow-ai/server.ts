@@ -90,9 +90,13 @@ function countScadParams(code: string): number {
 
 function detectOpenScadBin(): string | null {
   const candidates = [
+    // macOS
     "/Applications/OpenSCAD.app/Contents/MacOS/OpenSCAD",
     "/opt/homebrew/bin/openscad",
     "/usr/local/bin/openscad",
+    // Windows
+    "C:\\Program Files\\OpenSCAD\\openscad.exe",
+    "C:\\Program Files (x86)\\OpenSCAD\\openscad.exe",
   ];
   for (const c of candidates) {
     if (fs.existsSync(c)) return c;
@@ -117,6 +121,9 @@ async function generateWithGemini(prompt: string): Promise<ParametricResult> {
     "You are an expert OpenSCAD programmer.",
     "Output ONLY raw, compilable OpenSCAD code — no markdown, no code fences, no explanation.",
     "Use named variables for every dimension so parameters are easy to tweak.",
+    "After each parameter variable, add an OpenSCAD Customizer range comment on the same line.",
+    "Format: `variable = value;  // [min:max]` for continuous values, or `variable = value;  // [min:max:step]` for stepped values.",
+    "Choose sensible real-world bounds (e.g. `shaft_length = 30;  // [5:150]`, `num_sides = 6;  // [3:12:1]`).",
     "Set $fn = 64 for smooth curves.",
     "End with a top-level call or union() that renders the complete object.",
   ].join(" ");

@@ -5,15 +5,42 @@ import * as THREE from 'three';
 import type { EditorEntry, ModelRecord } from './types';
 
 /* ── SCAD helpers ── */
+
+interface ParamMeta {
+  value: number;
+  min: number;
+  max: number;
+  step: number;
+}
+
 function parseScadParams(code: string): Record<string, number> {
-  const params: Record<string, number> = {};
-  const re = /^([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*([\d.]+)\s*;/gm;
+  return Object.fromEntries(
+    Object.entries(parseScadParamsMeta(code)).map(([k, m]) => [k, m.value])
+  );
+}
+
+function parseScadParamsMeta(code: string): Record<string, ParamMeta> {
+  const result: Record<string, ParamMeta> = {};
+  // Match:  varname = number;  // [min:max]  or  // [min:max:step]
+  const re = /^([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*([\d.]+)\s*;(?:.*\/\/\s*\[([^\]]+)\])?/gm;
   let m;
   while ((m = re.exec(code)) !== null) {
-    const v = parseFloat(m[2]);
-    if (!isNaN(v)) params[m[1]] = v;
+    const value = parseFloat(m[2]);
+    if (isNaN(value)) continue;
+    let min = 0.1, max = value * 4 + 20, step = value >= 10 ? 0.5 : 0.1;
+    if (m[3]) {
+      const parts = m[3].split(':').map(Number);
+      if (parts.length === 2 && !parts.some(isNaN)) {
+        [min, max] = parts;
+        step = Number.isInteger(value) && (max - min) <= 30 ? 1 : (max - min) / 100;
+        step = parseFloat(step.toFixed(2));
+      } else if (parts.length === 3 && !parts.some(isNaN)) {
+        [min, max, step] = parts;
+      }
+    }
+    result[m[1]] = { value, min: Math.max(0.1, min), max, step };
   }
-  return params;
+  return result;
 }
 
 function substituteScadParams(code: string, params: Record<string, number>): string {
@@ -237,6 +264,7 @@ export function EditorScreen({ entry, dark, onToggleDark, onHome, onModelSaved }
   const [scadCode, setScadCode] = useState(entry.model?.code ?? '');
   const [renderCode, setRenderCode] = useState(entry.model?.code ?? ''); // code actually sent to OpenSCAD
   const [params, setParams] = useState<Record<string, number>>({});
+  const [paramsMeta, setParamsMeta] = useState<Record<string, ParamMeta>>({});
   const [paramsDirty, setParamsDirty] = useState(false);
   const [vt, setVt] = useState({ wireframe: false, grid: false, axes: false });
   const [scadOpen, setScadOpen] = useState(false);
@@ -260,7 +288,9 @@ export function EditorScreen({ entry, dark, onToggleDark, onHome, onModelSaved }
 
   useEffect(() => {
     if (entry.model?.code) {
-      setParams(parseScadParams(entry.model.code));
+      const meta = parseScadParamsMeta(entry.model.code);
+      setParams(Object.fromEntries(Object.entries(meta).map(([k, m]) => [k, m.value])));
+      setParamsMeta(meta);
       setScadCode(entry.model.code);
       setRenderCode(entry.model.code);
     }
@@ -295,9 +325,11 @@ export function EditorScreen({ entry, dark, onToggleDark, onHome, onModelSaved }
       setModel(savedModel);
       onModelSaved(savedModel);
       if (savedModel.code) {
+        const meta = parseScadParamsMeta(savedModel.code);
         setScadCode(savedModel.code);
         setRenderCode(savedModel.code);
-        setParams(parseScadParams(savedModel.code));
+        setParams(Object.fromEntries(Object.entries(meta).map(([k, m]) => [k, m.value])));
+        setParamsMeta(meta);
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Unknown error');
@@ -606,9 +638,12 @@ export function EditorScreen({ entry, dark, onToggleDark, onHome, onModelSaved }
               <InspSection>
                 <SectionHeader title="Parameters" right={<span style={{ fontSize: 10.5, color: 'var(--text-4)', fontFamily: 'var(--font-mono)' }}>auto-extracted</span>} />
                 {Object.entries(params).map(([key, val]) => {
-                  const max = val * 3 + 10;
-                  const min = 0;
-                  const pct = ((val - min) / (max - min)) * 100;
+                  const meta = paramsMeta[key];
+                  const min  = meta?.min ?? Math.max(0.1, val * 0.1);
+                  const max  = meta?.max ?? Math.max(val * 4, val + 20);
+                  const step = meta?.step ?? (val >= 10 ? 0.5 : 0.1);
+                  const unit = Number.isInteger(step) && (max - min) <= 30 ? '' : 'mm';
+                  const pct  = Math.min(100, Math.max(0, ((val - min) / (max - min)) * 100));
                   return (
                     <div key={key} style={{ marginBottom: 12 }}>
                       <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', marginBottom: 5 }}>
@@ -617,31 +652,34 @@ export function EditorScreen({ entry, dark, onToggleDark, onHome, onModelSaved }
                           <input
                             type="number"
                             value={val}
-                            step={Number.isInteger(val) ? 1 : 0.5}
-                            onChange={e => onParamChange(key, parseFloat(e.target.value) || 0)}
-                            style={{ width: 50, height: 22, padding: '0 6px', borderRadius: 5, border: '1px solid var(--border)', background: 'var(--surface)', color: 'var(--text)', fontFamily: 'var(--font-mono)', fontSize: 11, textAlign: 'right', outline: 'none' }}
+                            step={step}
+                            min={min}
+                            onChange={e => {
+                              const v = parseFloat(e.target.value);
+                              if (!isNaN(v) && v >= min) onParamChange(key, v);
+                            }}
+                            style={{ width: 54, height: 22, padding: '0 6px', borderRadius: 5, border: '1px solid var(--border)', background: 'var(--surface)', color: 'var(--text)', fontFamily: 'var(--font-mono)', fontSize: 11, textAlign: 'right', outline: 'none' }}
                           />
-                          <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--text-4)', width: 20 }}>mm</span>
+                          {unit && <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--text-4)', width: 20 }}>{unit}</span>}
                         </div>
                       </div>
                       <input
                         type="range" className="param-slider"
-                        min={min} max={max} step={Number.isInteger(val) ? 1 : 0.5}
-                        value={val}
+                        min={min} max={max} step={step}
+                        value={Math.min(max, Math.max(min, val))}
                         style={{ '--p': `${pct}%` } as React.CSSProperties}
                         onChange={e => onParamChange(key, parseFloat(e.target.value))}
                       />
                     </div>
                   );
                 })}
-                {paramsDirty && (
-                  <button
-                    onClick={() => { setRenderCode(scadCode); setParamsDirty(false); setRenderError(null); }}
-                    style={{ ...btnPrimary, background: 'var(--indigo)', color: 'white', marginTop: 4 }}
-                  >
-                    Apply &amp; re-render
-                  </button>
-                )}
+                <button
+                  disabled={!paramsDirty}
+                  onClick={() => { setRenderCode(scadCode); setParamsDirty(false); setRenderError(null); }}
+                  style={{ ...btnPrimary, marginTop: 8, opacity: paramsDirty ? 1 : 0.35, cursor: paramsDirty ? 'pointer' : 'default' }}
+                >
+                  Re-render
+                </button>
               </InspSection>
             )}
 
