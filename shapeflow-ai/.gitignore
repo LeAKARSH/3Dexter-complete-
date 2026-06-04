@@ -1,0 +1,26 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Environment — contains real secrets
+.env
+
+# Python
+__pycache__/
+*.pyc
+venv/
+.venv/
+
+# ML models & caches
+openscad_lora_model_3b
+openscad_lora_model_3b_2
+Parametric model/
+model_offload/
+shap_e_model_cache/
+hunyuan_outputs/
+shap_e_outputs/
+
+# App data
+store.json

@@ -1,7 +1,29 @@
-flask>=3.0,<4.0
+# Python dependencies for the active runner scripts in this project:
+# - shape_e_runner.py
+# - hunyuan_runner.py
+# - parametric_runner.py
+#
+# Notes:
+# - The main web app itself uses Node/Vite dependencies from package.json.
+# - `repair.py` is included in this project and is imported by organic runners.
+# - `Shape_E.py.py` is a legacy Flask helper and is not required for the
+#   current Express/Vite app, so Flask is intentionally not included here.
+
+# Core numerical / ML runtime
 torch>=2.2
-git+https://github.com/openai/shap-e.git
+numpy>=1.26.0
+
+# Parametric model runner
 transformers>=4.35.0
 peft>=0.7.0
 accelerate>=0.25.0
-bitsandbytes>=0.41.0
+bitsandbytes>=0.43.0
+
+# Organic model runners and model downloads
+huggingface_hub>=0.28.0
+git+https://github.com/openai/shap-e.git
+#git+https://github.com/deepbeepmeep/Hunyuan3D-2GP.git#subdirectory=mglllm
+
+# Mesh processing / repair used by the shared repair engine
+trimesh>=4.0.0
+pymeshfix>=0.16.0

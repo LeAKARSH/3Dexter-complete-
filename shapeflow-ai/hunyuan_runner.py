@@ -14,11 +14,31 @@ import gc
 import json
 import os
 import sys
+import uuid
 import torch
 
-# Add parent directory to path for repair module import
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from repair import RepairEngine, RepairConfig, Track
+
+
+def _export_mesh(mesh, ply_path: str, obj_path: str, stl_path: str) -> None:
+    """
+    Export mesh in PLY/OBJ/STL across mesh implementations.
+    Supports trimesh.Trimesh and Shape-E style tri-mesh objects.
+    """
+    if hasattr(mesh, "export"):
+        mesh.export(ply_path, file_type="ply")
+        mesh.export(obj_path, file_type="obj")
+        mesh.export(stl_path, file_type="stl")
+        return
+
+    if hasattr(mesh, "write_ply") and hasattr(mesh, "write_obj"):
+        with open(ply_path, "wb") as ply_file:
+            mesh.write_ply(ply_file)
+        with open(obj_path, "w") as obj_file:
+            mesh.write_obj(obj_file)
+        return
+
+    raise TypeError(f"Unsupported mesh type for export: {type(mesh)}")
 
 
 def run_hunyuan(text: str, output_dir: str, batch_size: int = 1):
@@ -28,9 +48,10 @@ def run_hunyuan(text: str, output_dir: str, batch_size: int = 1):
     state leaks into module-level memory between calls.
     """
     # --- lazy imports ---
+    import trimesh
+    
     from huggingface_hub import hf_hub_download
     from mglllm.utils.third_party.ollama import generate_3d
-    from mglllm.utils.third_party.ply import save_mesh
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -101,13 +122,16 @@ def run_hunyuan(text: str, output_dir: str, batch_size: int = 1):
             raise ValueError("Hunyuan generation returned no meshes")
         
         successful_meshes = 0
+        run_id = uuid.uuid4().hex[:8]
         for i, mesh_data in enumerate(meshes):
             # Extract mesh from result (format depends on generate_3d output)
             if hasattr(mesh_data, 'mesh'):
                 mesh = mesh_data.mesh
+                if mesh is None:
+                    print(f"[hunyuan] Mesh {i} is None - skipping", file=sys.stderr)
+                    continue
             elif hasattr(mesh_data, 'vertices'):
                 # Already a trimesh object
-                import trimesh
                 mesh = mesh_data
             else:
                 print(f"[hunyuan] Unknown mesh format for mesh {i}", file=sys.stderr)
@@ -117,8 +141,16 @@ def run_hunyuan(text: str, output_dir: str, batch_size: int = 1):
             print(f"[hunyuan] Repairing mesh {i}...", file=sys.stderr)
             repair_result = repair_engine.repair(mesh)
             
+            # Ensure we always have a trimesh.Trimesh object for export
             if not repair_result.ok:
                 print(f"[hunyuan] Repair warning for mesh {i}: {repair_result.error}", file=sys.stderr)
+                # Ensure original mesh is a trimesh object before using as fallback
+                if not isinstance(mesh, trimesh.Trimesh):
+                    if hasattr(mesh, 'vertices') and hasattr(mesh, 'faces'):
+                        mesh = trimesh.Trimesh(vertices=mesh.vertices, faces=mesh.faces, process=False)
+                    else:
+                        print(f"[hunyuan] Cannot use mesh {i} - not a valid trimesh object", file=sys.stderr)
+                        continue
                 repaired_mesh = mesh
             else:
                 repaired_mesh = repair_result.mesh
@@ -126,24 +158,21 @@ def run_hunyuan(text: str, output_dir: str, batch_size: int = 1):
                 print(f"[hunyuan] Mesh {i} repaired: watertight={repair_result.report['after']['watertight']}, "
                       f"holes={repair_result.report['after']['holes']}", file=sys.stderr)
 
-            ply_name = f"mesh_{i}.ply"
-            obj_name = f"mesh_{i}.obj"
-            stl_name = f"mesh_{i}.stl"
+            ply_name = f"hunyuan_{run_id}_{i}.ply"
+            obj_name = f"hunyuan_{run_id}_{i}.obj"
+            stl_name = f"hunyuan_{run_id}_{i}.stl"
 
             ply_path = os.path.join(output_dir, ply_name)
             obj_path = os.path.join(output_dir, obj_name)
             stl_path = os.path.join(output_dir, stl_name)
 
             # Save in multiple formats
-            with open(ply_path, "wb") as f:
-                repaired_mesh.write_ply(f)
-            with open(obj_path, "w") as f:
-                repaired_mesh.write_obj(f)
-            repaired_mesh.export(stl_path)
+            _export_mesh(repaired_mesh, ply_path, obj_path, stl_path)
 
             saved_files.append(ply_name)
             saved_files.append(obj_name)
-            saved_files.append(stl_name)
+            if os.path.exists(stl_path):
+                saved_files.append(stl_name)
             successful_meshes += 1
             print(f"[hunyuan] Saved {ply_name}, {obj_name}, and {stl_name}", file=sys.stderr)
         
@@ -180,7 +209,7 @@ def main() -> int:
             "files": files,
             "message": "Generated by Hunyuan3D-2GP with mesh repair",
             "repair_reports": repair_reports,
-            "mesh_count": len(files) // 3,  # 3 files per mesh (ply, obj, stl)
+            "mesh_count": len([name for name in files if name.lower().endswith(".obj")]),
         }
         
         print(json.dumps(response))

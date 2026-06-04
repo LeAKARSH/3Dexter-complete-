@@ -1,0 +1,9 @@
+{
+  "name": "3dexter",
+  "private": true,
+  "scripts": {
+    "dev": "npm --prefix shapeflow-ai run dev",
+    "build": "npm --prefix shapeflow-ai run build",
+    "start": "npm --prefix shapeflow-ai run start"
+  }
+}

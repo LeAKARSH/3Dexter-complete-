@@ -5,19 +5,148 @@ import { fileURLToPath } from "url";
 import { spawn } from "child_process";
 import { createServer as createViteServer } from "vite";
 import dotenv from "dotenv";
+import { randomUUID } from "crypto";
+import os from "os";
+import { execSync } from "child_process";
+import { GoogleGenAI } from "@google/genai";
 
 dotenv.config();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const PARAMETRIC_MODEL_URL = process.env.PARAMETRIC_MODEL_URL?.replace(/\/$/, "");
-const PARAMETRIC_MODEL_PATH = process.env.PARAMETRIC_MODEL_PATH;
 const PARAMETRIC_RUNNER_SCRIPT = process.env.PARAMETRIC_RUNNER_SCRIPT || path.join(__dirname, "parametric_runner.py");
 const SHAPE_E_RUNNER_SCRIPT = process.env.SHAPE_E_RUNNER_SCRIPT || path.join(__dirname, "shape_e_runner.py");
 const HUNYUAN_RUNNER_SCRIPT = process.env.HUNYUAN_RUNNER_SCRIPT || path.join(__dirname, "hunyuan_runner.py");
 const SHAPE_E_OUTPUT_DIR = process.env.SHAPE_E_OUTPUT_DIR || path.join(__dirname, "shap_e_outputs");
 const HUNYUAN_OUTPUT_DIR = process.env.HUNYUAN_OUTPUT_DIR || path.join(__dirname, "hunyuan_outputs");
-const PYTHON_EXECUTABLE = process.env.PARAMETRIC_PYTHON_BIN || "python";
+const PYTHON_EXECUTABLE = process.env.PYTHON_BIN || process.env.PARAMETRIC_PYTHON_BIN || "python";
+
+// ─── Persistence store ───────────────────────────────────────────────────────
+
+const STORE_PATH = path.join(__dirname, "store.json");
+
+interface ModelRecord {
+  id: string;
+  name: string;
+  prompt: string;
+  route: "parametric" | "organic";
+  createdAt: string;
+  thumbnail?: string;
+  version: number;
+  // Parametric
+  code?: string;
+  paramCount?: number;
+  // Organic
+  files?: string[];
+  objFile?: string | null;
+  plyFile?: string | null;
+  objUrl?: string | null;
+  plyUrl?: string | null;
+  repairReports?: any[];
+  modelType?: "shap-e" | "hunyuan3d";
+  backend?: "local" | "gemini";
+}
+
+interface ActivityRecord {
+  id: string;
+  type: "generated" | "exported";
+  modelId: string;
+  modelName: string;
+  detail?: string;
+  createdAt: string;
+}
+
+interface AppStore {
+  models: ModelRecord[];
+  activity: ActivityRecord[];
+}
+
+function loadStore(): AppStore {
+  try {
+    if (fs.existsSync(STORE_PATH)) {
+      return JSON.parse(fs.readFileSync(STORE_PATH, "utf-8")) as AppStore;
+    }
+  } catch {}
+  return { models: [], activity: [] };
+}
+
+function saveStore(store: AppStore): void {
+  fs.writeFileSync(STORE_PATH, JSON.stringify(store, null, 2));
+}
+
+const appStore = loadStore();
+
+function deriveModelName(prompt: string): string {
+  return prompt.trim().split(/\s+/).slice(0, 6).join(" ")
+    .replace(/^./, (c) => c.toUpperCase());
+}
+
+function countScadParams(code: string): number {
+  return (code.match(/^[a-zA-Z_][a-zA-Z0-9_]*\s*=\s*[\d.]+\s*;/gm) ?? []).length;
+}
+
+// ─── OpenSCAD ─────────────────────────────────────────────────────────────────
+
+function detectOpenScadBin(): string | null {
+  const candidates = [
+    // macOS
+    "/Applications/OpenSCAD.app/Contents/MacOS/OpenSCAD",
+    "/opt/homebrew/bin/openscad",
+    "/usr/local/bin/openscad",
+    // Windows
+    "C:\\Program Files\\OpenSCAD\\openscad.exe",
+    "C:\\Program Files (x86)\\OpenSCAD\\openscad.exe",
+  ];
+  for (const c of candidates) {
+    if (fs.existsSync(c)) return c;
+  }
+  try { execSync("openscad --version", { stdio: "ignore" }); return "openscad"; } catch {}
+  return null;
+}
+
+const OPENSCAD_BIN = detectOpenScadBin();
+
+// ─── Gemini ───────────────────────────────────────────────────────────────────
+
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
+
+async function generateWithGemini(prompt: string): Promise<ParametricResult> {
+  if (!GEMINI_API_KEY) {
+    throw Object.assign(new Error("GEMINI_API_KEY is not set in .env"), { statusCode: 501 });
+  }
+  const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
+  const systemInstruction = [
+    "You are an expert OpenSCAD programmer.",
+    "Output ONLY raw, compilable OpenSCAD code — no markdown, no code fences, no explanation.",
+    "Use named variables for every dimension so parameters are easy to tweak.",
+    "After each parameter variable, add an OpenSCAD Customizer range comment on the same line.",
+    "Format: `variable = value;  // [min:max]` for continuous values, or `variable = value;  // [min:max:step]` for stepped values.",
+    "Choose sensible real-world bounds (e.g. `shaft_length = 30;  // [5:150]`, `num_sides = 6;  // [3:12:1]`).",
+    "Set $fn = 64 for smooth curves.",
+    "End with a top-level call or union() that renders the complete object.",
+  ].join(" ");
+
+  const response = await ai.models.generateContent({
+    model: GEMINI_MODEL,
+    config: { systemInstruction },
+    contents: prompt,
+  });
+
+  let code = (response.text ?? "").trim();
+  // Strip accidental markdown code fences
+  code = code.replace(/^```(?:openscad|scad)?\n?/i, "").replace(/\n?```\s*$/i, "").trim();
+
+  if (!code) throw Object.assign(new Error("Gemini returned empty output"), { statusCode: 502 });
+
+  return {
+    code,
+    message: `Generated by ${GEMINI_MODEL}`,
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 type ParametricResult = {
   code: string;
@@ -32,6 +161,52 @@ type OrganicResult = {
 
 // Supported organic mesh generation models
 type OrganicModelType = "shap-e" | "hunyuan3d";
+
+function isValidParametricAdapterDir(modelPath: string) {
+  const configPath = path.join(modelPath, "adapter_config.json");
+  const weightsPath = path.join(modelPath, "adapter_model.safetensors");
+  return fs.existsSync(configPath) && fs.existsSync(weightsPath);
+}
+
+function detectLocalParametricModelPath() {
+  const candidateDirs = [
+    path.join(__dirname, "Parametric model", "openscad_lora_model_3b_2"),
+    path.join(__dirname, "Parametric model", "openscad_lora_model_3b"),
+    path.join(__dirname, "openscad_lora_model_3b_2"),
+    path.join(__dirname, "openscad_lora_model_3b"),
+  ];
+
+  for (const candidate of candidateDirs) {
+    if (isValidParametricAdapterDir(candidate)) {
+      return candidate;
+    }
+  }
+
+  return null;
+}
+
+const RESOLVED_PARAMETRIC_MODEL_PATH =
+  process.env.PARAMETRIC_MODEL_PATH && isValidParametricAdapterDir(process.env.PARAMETRIC_MODEL_PATH)
+    ? process.env.PARAMETRIC_MODEL_PATH
+    : detectLocalParametricModelPath();
+
+function parseRunnerJson<T>(stdout: string, label: string): Partial<T> {
+  const trimmed = stdout.trim();
+  if (!trimmed) {
+    throw new Error(`${label} produced no JSON output.`);
+  }
+
+  const lines = trimmed.split(/\r?\n/).filter(Boolean);
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    try {
+      return JSON.parse(lines[index]) as Partial<T>;
+    } catch {
+      // Keep scanning for the last valid JSON line.
+    }
+  }
+
+  throw new Error(`Invalid JSON from ${label}: ${trimmed}`);
+}
 
 function classifyPrompt(prompt: string): "organic" | "parametric" {
   const organicKeywords = [
@@ -59,53 +234,75 @@ function classifyPrompt(prompt: string): "organic" | "parametric" {
 }
 
 async function generateParametricModel(prompt: string): Promise<ParametricResult> {
-  if (PARAMETRIC_MODEL_PATH) {
+  if (RESOLVED_PARAMETRIC_MODEL_PATH) {
     return runLocalParametricModel(prompt);
   }
 
-  // This is the extension point for your future fine-tuned parametric model.
-  // If you expose it as an HTTP service, set PARAMETRIC_MODEL_URL and return
-  // JSON shaped like: { code: string, message?: string }.
-  if (!PARAMETRIC_MODEL_URL) {
+  if (PARAMETRIC_MODEL_URL) {
+    const response = await fetch(PARAMETRIC_MODEL_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prompt }),
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw Object.assign(
+        new Error(`Parametric model request failed (${response.status}): ${errorText || "Unknown error"}`),
+        { statusCode: response.status },
+      );
+    }
+
+    const result = (await response.json()) as Partial<ParametricResult>;
+    if (!result.code) {
+      throw Object.assign(
+        new Error("Parametric model response must include a 'code' field."),
+        { statusCode: 502 },
+      );
+    }
+
+    return {
+      code: result.code,
+      message: result.message || "Generated by custom parametric model",
+    };
+  }
+
+  throw Object.assign(
+    new Error("Parametric model is not configured. Set PARAMETRIC_MODEL_PATH in your .env to your local model folder."),
+    { statusCode: 501 },
+  );
+}
+
+function validateLocalParametricModel() {
+  if (!RESOLVED_PARAMETRIC_MODEL_PATH) {
     throw Object.assign(
-      new Error("Parametric model is not configured yet. Set PARAMETRIC_MODEL_URL or replace generateParametricModel()."),
+      new Error("No valid parametric adapter directory found. Set PARAMETRIC_MODEL_PATH in .env or place the adapter under 'Parametric model'."),
       { statusCode: 501 },
     );
   }
 
-  const response = await fetch(PARAMETRIC_MODEL_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ prompt }),
-  });
-
-  if (!response.ok) {
-    const errorText = await response.text();
+  if (!fs.existsSync(RESOLVED_PARAMETRIC_MODEL_PATH)) {
     throw Object.assign(
-      new Error(`Parametric model request failed (${response.status}): ${errorText || "Unknown error"}`),
-      { statusCode: response.status },
+      new Error(`Parametric model path does not exist: ${RESOLVED_PARAMETRIC_MODEL_PATH}`),
+      { statusCode: 500 },
     );
   }
 
-  const result = (await response.json()) as Partial<ParametricResult>;
-  if (!result.code) {
+  if (!isValidParametricAdapterDir(RESOLVED_PARAMETRIC_MODEL_PATH)) {
     throw Object.assign(
-      new Error("Parametric model response must include a 'code' field."),
-      { statusCode: 502 },
+      new Error(`Invalid parametric adapter directory: ${RESOLVED_PARAMETRIC_MODEL_PATH}. Missing adapter_config.json or adapter_model.safetensors.`),
+      { statusCode: 500 },
     );
   }
-
-  return {
-    code: result.code,
-    message: result.message || "Generated by custom parametric model",
-  };
 }
 
 async function runLocalParametricModel(prompt: string): Promise<ParametricResult> {
+  validateLocalParametricModel();
+
   return new Promise((resolve, reject) => {
     const child = spawn(
       PYTHON_EXECUTABLE,
-      [PARAMETRIC_RUNNER_SCRIPT, "--model", PARAMETRIC_MODEL_PATH!, "--prompt", prompt],
+      [PARAMETRIC_RUNNER_SCRIPT, "--model", RESOLVED_PARAMETRIC_MODEL_PATH!, "--prompt", prompt],
       {
         cwd: __dirname,
         env: process.env,
@@ -145,7 +342,7 @@ async function runLocalParametricModel(prompt: string): Promise<ParametricResult
       }
 
       try {
-        const parsed = JSON.parse(stdout) as Partial<ParametricResult>;
+        const parsed = parseRunnerJson<ParametricResult>(stdout, "local parametric runner");
         if (!parsed.code) {
           reject(
             Object.assign(
@@ -163,7 +360,7 @@ async function runLocalParametricModel(prompt: string): Promise<ParametricResult
       } catch (error) {
         reject(
           Object.assign(
-            new Error(`Invalid JSON from local parametric runner: ${stdout || String(error)}`),
+            new Error(error instanceof Error ? error.message : `Invalid JSON from local parametric runner: ${stdout}`),
             { statusCode: 502 },
           ),
         );
@@ -216,9 +413,9 @@ async function runLocalShapeERunner(prompt: string): Promise<OrganicResult> {
         );
         return;
       }
-
+      
       try {
-        const parsed = JSON.parse(stdout) as Partial<OrganicResult>;
+        const parsed = parseRunnerJson<OrganicResult>(stdout, "Shape-E runner");
         if (!parsed.files) {
           reject(
             Object.assign(
@@ -232,11 +429,12 @@ async function runLocalShapeERunner(prompt: string): Promise<OrganicResult> {
         resolve({
           files: parsed.files,
           message: parsed.message || "Generated by Shape-E",
+          repair_reports: parsed.repair_reports,
         });
       } catch (error) {
         reject(
           Object.assign(
-            new Error(`Invalid JSON from Shape-E runner: ${stdout || String(error)}`),
+            new Error(error instanceof Error ? error.message : `Invalid JSON from Shape-E runner: ${stdout}`),
             { statusCode: 502 },
           ),
         );
@@ -291,7 +489,7 @@ async function runLocalHunyuanRunner(prompt: string): Promise<OrganicResult> {
       }
 
       try {
-        const parsed = JSON.parse(stdout) as Partial<OrganicResult>;
+        const parsed = parseRunnerJson<OrganicResult>(stdout, "Hunyuan runner");
         if (!parsed.files) {
           reject(
             Object.assign(
@@ -310,7 +508,7 @@ async function runLocalHunyuanRunner(prompt: string): Promise<OrganicResult> {
       } catch (error) {
         reject(
           Object.assign(
-            new Error(`Invalid JSON from Hunyuan runner: ${stdout || String(error)}`),
+            new Error(error instanceof Error ? error.message : `Invalid JSON from Hunyuan runner: ${stdout}`),
             { statusCode: 502 },
           ),
         );
@@ -335,7 +533,7 @@ async function generateOrganicModel(prompt: string, modelType: OrganicModelType 
     files: result.files,
     objFile,
     plyFile,
-    objUrl: objFile ? `/api/organic/download/${encodeURIComponent(objFile)}` : null,
+    objUrl: objFile ? `/api/organic/view/${encodeURIComponent(objFile)}` : null,
     plyUrl: plyFile ? `/api/organic/download/${encodeURIComponent(plyFile)}` : null,
     message: result.message,
     repairReports: result.repair_reports,
@@ -343,9 +541,31 @@ async function generateOrganicModel(prompt: string, modelType: OrganicModelType 
   };
 }
 
+function resolveOrganicOutputFile(filename: string) {
+  let filePath = path.join(SHAPE_E_OUTPUT_DIR, filename);
+
+  if (!fs.existsSync(filePath)) {
+    filePath = path.join(HUNYUAN_OUTPUT_DIR, filename);
+  }
+
+  const normalizedPath = path.normalize(filePath);
+  const allowedDirs = [path.normalize(SHAPE_E_OUTPUT_DIR), path.normalize(HUNYUAN_OUTPUT_DIR)];
+  const isAllowed = allowedDirs.some((dir) => normalizedPath.startsWith(dir));
+
+  if (!isAllowed) {
+    throw Object.assign(new Error("Access denied"), { statusCode: 403 });
+  }
+
+  if (!fs.existsSync(normalizedPath)) {
+    throw Object.assign(new Error(`File not found: ${filename}`), { statusCode: 404 });
+  }
+
+  return normalizedPath;
+}
+
 async function startServer() {
   const app = express();
-  const PORT = 3000;
+  const PORT = parseInt(process.env.PORT ?? "3000", 10);
 
   // Ensure output directories exist
   if (!fs.existsSync(SHAPE_E_OUTPUT_DIR)) {
@@ -357,30 +577,157 @@ async function startServer() {
 
   app.use(express.json());
 
+  app.get("/api/config", (_req, res) => {
+    res.json({
+      parametricModelConfigured: Boolean(RESOLVED_PARAMETRIC_MODEL_PATH && isValidParametricAdapterDir(RESOLVED_PARAMETRIC_MODEL_PATH)),
+      parametricModelPath: RESOLVED_PARAMETRIC_MODEL_PATH || null,
+      pythonExecutable: PYTHON_EXECUTABLE,
+      organicModels: ["shap-e", "hunyuan3d"],
+      geminiAvailable: Boolean(GEMINI_API_KEY),
+      geminiModel: GEMINI_MODEL,
+      openscadAvailable: Boolean(OPENSCAD_BIN),
+    });
+  });
+
+  app.post("/api/render-scad", express.json({ limit: "512kb" }), async (req, res) => {
+    const { code } = req.body as { code?: string };
+    if (!code) return res.status(400).json({ error: "code required" });
+    if (!OPENSCAD_BIN) return res.status(501).json({ error: "OpenSCAD not found on this server" });
+
+    const id = randomUUID();
+    const scadPath = path.join(os.tmpdir(), `${id}.scad`);
+    const stlPath  = path.join(os.tmpdir(), `${id}.stl`);
+
+    const cleanup = () => {
+      for (const p of [scadPath, stlPath]) {
+        try { fs.unlinkSync(p); } catch {}
+      }
+    };
+
+    try {
+      fs.writeFileSync(scadPath, code, "utf-8");
+
+      await new Promise<void>((resolve, reject) => {
+        const child = spawn(OPENSCAD_BIN!, ["-o", stlPath, scadPath], {
+          cwd: os.tmpdir(),
+          stdio: ["ignore", "ignore", "pipe"],
+        });
+        let stderr = "";
+        child.stderr?.on("data", (d: Buffer) => { stderr += d.toString(); });
+        child.on("error", reject);
+        child.on("close", (code) => {
+          if (code !== 0) reject(new Error(stderr.trim() || `OpenSCAD exited with code ${code}`));
+          else resolve();
+        });
+
+        // 60-second hard timeout
+        setTimeout(() => { child.kill(); reject(new Error("OpenSCAD timed out")); }, 60_000);
+      });
+
+      res.setHeader("Content-Type", "model/stl");
+      res.sendFile(stlPath, (err) => {
+        cleanup();
+        if (err && !res.headersSent) res.status(500).json({ error: "Failed to send STL" });
+      });
+    } catch (err) {
+      cleanup();
+      const message = err instanceof Error ? err.message : "Render failed";
+      res.status(422).json({ error: message });
+    }
+  });
+
+  // ─── Model library endpoints ─────────────────────────────────────────────
+
+  app.get("/api/models", (_req, res) => {
+    res.json({ models: appStore.models });
+  });
+
+  app.get("/api/activity", (_req, res) => {
+    res.json({ activity: appStore.activity });
+  });
+
+  app.patch("/api/models/:id/thumbnail", express.json({ limit: "2mb" }), (req, res) => {
+    const { thumbnail } = req.body as { thumbnail?: string };
+    if (!thumbnail) return res.status(400).json({ error: "thumbnail required" });
+    const model = appStore.models.find((m) => m.id === req.params.id);
+    if (!model) return res.status(404).json({ error: "Model not found" });
+    model.thumbnail = thumbnail;
+    saveStore(appStore);
+    res.json({ ok: true });
+  });
+
   // API Routes
   app.post("/api/route", async (req, res) => {
-    const { prompt, modelType } = req.body;
+    const { prompt, modelType, generationBackend } = req.body;
     if (!prompt) return res.status(400).json({ error: "Prompt is required" });
 
     try {
+      const modelId = randomUUID();
+      const modelName = deriveModelName(prompt);
+      const now = new Date().toISOString();
+
       const route = classifyPrompt(prompt);
-      
+
       if (route === "parametric") {
-        const parametricResponse = await generateParametricModel(prompt);
+        const parametricResponse = generationBackend === "gemini"
+          ? await generateWithGemini(prompt)
+          : await generateParametricModel(prompt);
+        const paramCount = countScadParams(parametricResponse.code);
+
+        const record: ModelRecord = {
+          id: modelId, name: modelName, prompt, route: "parametric",
+          createdAt: now, version: 1,
+          code: parametricResponse.code, paramCount,
+          backend: generationBackend === "gemini" ? "gemini" : "local",
+        };
+        appStore.models.unshift(record);
+        appStore.activity.unshift({
+          id: randomUUID(), type: "generated", modelId, modelName,
+          detail: `${generationBackend === "gemini" ? "Gemini · " : ""}${paramCount} params`,
+          createdAt: now,
+        });
+        appStore.models = appStore.models.slice(0, 100);
+        appStore.activity = appStore.activity.slice(0, 50);
+        saveStore(appStore);
+
         return res.json({
           type: "parametric",
           code: parametricResponse.code,
           message: parametricResponse.message,
+          model: record,
         });
       }
 
-      // Support model selection for organic generation
       const selectedModel = modelType === "hunyuan3d" ? "hunyuan3d" : "shap-e";
       const organicResponse = await generateOrganicModel(prompt, selectedModel);
+
+      const record: ModelRecord = {
+        id: modelId, name: modelName, prompt, route: "organic",
+        createdAt: now, version: 1,
+        files: organicResponse.files,
+        objFile: organicResponse.objFile,
+        plyFile: organicResponse.plyFile,
+        objUrl: organicResponse.objUrl,
+        plyUrl: organicResponse.plyUrl,
+        repairReports: organicResponse.repairReports,
+        modelType: selectedModel,
+        backend: "local",
+      };
+      appStore.models.unshift(record);
+      appStore.activity.unshift({
+        id: randomUUID(), type: "generated", modelId, modelName,
+        detail: selectedModel === "hunyuan3d" ? "Hunyuan3D" : "Shape-E",
+        createdAt: now,
+      });
+      appStore.models = appStore.models.slice(0, 100);
+      appStore.activity = appStore.activity.slice(0, 50);
+      saveStore(appStore);
+
       return res.json({
         type: "organic",
         data: organicResponse,
         message: organicResponse.message,
+        model: record,
       });
     } catch (error) {
       console.error("Pipeline error:", error);
@@ -393,23 +740,25 @@ async function startServer() {
     }
   });
 
+  app.get("/api/organic/view/:filename", (req, res) => {
+    try {
+      const filePath = resolveOrganicOutputFile(req.params.filename);
+      res.sendFile(filePath);
+    } catch (error) {
+      console.error("Organic preview error:", error);
+      const statusCode =
+        typeof error === "object" && error && "statusCode" in error && typeof error.statusCode === "number"
+          ? error.statusCode
+          : 500;
+      const message = error instanceof Error ? error.message : "Failed to load preview file";
+      res.status(statusCode).json({ error: message });
+    }
+  });
+
   app.get("/api/organic/download/:filename", (req, res) => {
     try {
       const filename = req.params.filename;
-      // Check both output directories
-      let filePath = path.join(SHAPE_E_OUTPUT_DIR, filename);
-      
-      if (!fs.existsSync(filePath)) {
-        filePath = path.join(HUNYUAN_OUTPUT_DIR, filename);
-      }
-      
-      // Security check: ensure the file is within an allowed output directory
-      const normalizedPath = path.normalize(filePath);
-      const allowedDirs = [path.normalize(SHAPE_E_OUTPUT_DIR), path.normalize(HUNYUAN_OUTPUT_DIR)];
-      const isAllowed = allowedDirs.some(dir => normalizedPath.startsWith(dir));
-      if (!isAllowed) {
-        return res.status(403).json({ error: "Access denied" });
-      }
+      const filePath = resolveOrganicOutputFile(filename);
 
       res.download(filePath, filename, (err) => {
         if (err) {
@@ -421,7 +770,12 @@ async function startServer() {
       });
     } catch (error) {
       console.error("Organic download error:", error);
-      res.status(500).json({ error: "Failed to download file" });
+      const statusCode =
+        typeof error === "object" && error && "statusCode" in error && typeof error.statusCode === "number"
+          ? error.statusCode
+          : 500;
+      const message = error instanceof Error ? error.message : "Failed to download file";
+      res.status(statusCode).json({ error: message });
     }
   });
 

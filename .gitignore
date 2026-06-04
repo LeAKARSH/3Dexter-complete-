@@ -1,3 +1,6 @@
-shapeflow-ai/.env
-shapeflow-ai/node_modules/
-shapeflow-ai/openscad_lora_model_3b
+# Python (root-level scripts)
+__pycache__/
+*.pyc
+
+# shapeflow-ai has its own .gitignore
+

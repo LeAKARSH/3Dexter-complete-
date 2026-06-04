@@ -12,11 +12,34 @@ import gc
 import json
 import os
 import sys
+import uuid
 import torch
 
-# Add parent directory to path for repair module import
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from repair import RepairEngine, RepairConfig, Track
+
+
+def _export_mesh(mesh, ply_path: str, obj_path: str, stl_path: str) -> None:
+    """
+    Export mesh in PLY/OBJ/STL across mesh implementations.
+    Supports trimesh.Trimesh and Shape-E style tri-mesh objects.
+    """
+    # trimesh.Trimesh path
+    if hasattr(mesh, "export"):
+        mesh.export(ply_path, file_type="ply")
+        mesh.export(obj_path, file_type="obj")
+        mesh.export(stl_path, file_type="stl")
+        return
+
+    # Shape-E tri-mesh path
+    if hasattr(mesh, "write_ply") and hasattr(mesh, "write_obj"):
+        with open(ply_path, "wb") as ply_file:
+            mesh.write_ply(ply_file)
+        with open(obj_path, "w") as obj_file:
+            mesh.write_obj(obj_file)
+        # STL is optional for non-trimesh meshes; skip if unavailable.
+        return
+
+    raise TypeError(f"Unsupported mesh type for export: {type(mesh)}")
 
 
 def run_shap_e(text: str, output_dir: str, batch_size: int = 1):
@@ -26,6 +49,8 @@ def run_shap_e(text: str, output_dir: str, batch_size: int = 1):
     torch state leaks into module-level memory between calls.
     """
     # --- lazy imports so nothing loads at startup ---
+    import trimesh
+    
     from shap_e.diffusion.gaussian_diffusion import diffusion_from_config
     from shap_e.diffusion.sample import sample_latents
     from shap_e.models.download import load_config, load_model
@@ -52,9 +77,9 @@ def run_shap_e(text: str, output_dir: str, batch_size: int = 1):
             clip_denoised=True,
             use_fp16=True,
             use_karras=True,
-            karras_steps=16,
+            karras_steps=35,
             sigma_min=1e-3,
-            sigma_max=160,
+            sigma_max=90,
             s_churn=0,
         )
 
@@ -72,6 +97,8 @@ def run_shap_e(text: str, output_dir: str, batch_size: int = 1):
         )
         repair_engine = RepairEngine(repair_config)
         
+        run_id = uuid.uuid4().hex[:8]
+
         for i, latent in enumerate(latents):
             tri = decode_latent_mesh(xm, latent).tri_mesh()
 
@@ -79,9 +106,16 @@ def run_shap_e(text: str, output_dir: str, batch_size: int = 1):
             print(f"[shap-e] Repairing mesh {i}...", file=sys.stderr)
             repair_result = repair_engine.repair(tri)
             
+            # Ensure we always have a trimesh.Trimesh object for export
             if not repair_result.ok:
                 print(f"[shap-e] Repair warning for mesh {i}: {repair_result.error}", file=sys.stderr)
-                # Use original mesh if repair failed
+                # Ensure original mesh is a trimesh object before using as fallback
+                if not isinstance(tri, trimesh.Trimesh):
+                    if hasattr(tri, 'vertices') and hasattr(tri, 'faces'):
+                        tri = trimesh.Trimesh(vertices=tri.vertices, faces=tri.faces, process=False)
+                    else:
+                        print(f"[shap-e] Cannot use mesh {i} - not a valid trimesh object", file=sys.stderr)
+                        continue
                 repaired_mesh = tri
             else:
                 repaired_mesh = repair_result.mesh
@@ -89,24 +123,20 @@ def run_shap_e(text: str, output_dir: str, batch_size: int = 1):
                 print(f"[shap-e] Mesh {i} repaired: watertight={repair_result.report['after']['watertight']}, "
                       f"holes={repair_result.report['after']['holes']}", file=sys.stderr)
 
-            ply_name = f"mesh_{i}.ply"
-            obj_name = f"mesh_{i}.obj"
-            stl_name = f"mesh_{i}.stl"  # Add STL export for 3D printing
+            ply_name = f"shapee_{run_id}_{i}.ply"
+            obj_name = f"shapee_{run_id}_{i}.obj"
+            stl_name = f"shapee_{run_id}_{i}.stl"
 
             ply_path = os.path.join(output_dir, ply_name)
             obj_path = os.path.join(output_dir, obj_name)
             stl_path = os.path.join(output_dir, stl_name)
 
-            with open(ply_path, "wb") as f:
-                repaired_mesh.write_ply(f)
-            with open(obj_path, "w") as f:
-                repaired_mesh.write_obj(f)
-            # Export repaired mesh as STL for 3D printing
-            repaired_mesh.export(stl_path)
+            _export_mesh(repaired_mesh, ply_path, obj_path, stl_path)
 
             saved_files.append(ply_name)
             saved_files.append(obj_name)
-            saved_files.append(stl_name)
+            if os.path.exists(stl_path):
+                saved_files.append(stl_name)
             print(f"[shap-e] Saved {ply_name}, {obj_name}, and {stl_name}", file=sys.stderr)
 
         return saved_files, repair_reports
@@ -142,7 +172,7 @@ def main() -> int:
             "files": files,
             "message": "Generated by Shape-E with mesh repair",
             "repair_reports": repair_reports,
-            "mesh_count": len(files) // 3,  # 3 files per mesh (ply, obj, stl)
+            "mesh_count": len([name for name in files if name.lower().endswith(".obj")]),
         }
         
         print(json.dumps(response))
